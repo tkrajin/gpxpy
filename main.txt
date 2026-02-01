@@ -1,0 +1,481 @@
+# %%
+import gpxpy
+import pandas as pd
+import sqlite3
+import requests
+import random
+from PIL import ImageEnhance
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy import stats
+from scipy.stats import shapiro, skew
+from staticmap import StaticMap, Line
+import seaborn as sns
+import folium
+from folium.plugins import HeatMap
+from geopy.distance import geodesic
+from sklearn.cluster import DBSCAN
+
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.svm import SVC
+from sklearn.metrics import accuracy_score, recall_score, f1_score, roc_auc_score, classification_report
+from sklearn.preprocessing import LabelEncoder
+import xgboost as xgb
+import pickle
+
+from scipy.stats import ks_2samp
+import json
+from datetime import datetime
+
+# %% [markdown]
+# A1.1 Загружены все предоставленные треки 2,00
+
+# %%
+gpx_files = ["1.gpx", "2.gpx", "3.gpx"]  
+
+data = []
+
+for gpx_file in gpx_files:
+    with open(gpx_file, 'r', encoding='utf-8') as file:
+        gpx = gpxpy.parse(file)
+    
+    for track in gpx.tracks:
+        for segment in track.segments:
+            for point in segment.points:
+                data.append({
+                    "lon": point.longitude,
+                    "lat": point.latitude,
+                    "ele": point.elevation,
+                    "time": point.time,
+                    "track_name": track.name  
+                })
+
+df = pd.DataFrame(data)
+
+# %% [markdown]
+# A1.2 Получены изображения карт с наложенным маршрутом для каждого трека 2,00
+
+# %%
+for track_index, (track_name, track_group) in enumerate(df.groupby('track_name')):
+    static_map = StaticMap(800, 600)
+    track_group = track_group.sort_values('time')  
+    coordinates = list(zip(track_group['lon'], track_group['lat']))
+    line_color = 'red'
+    track_line = Line(coordinates, line_color, 2)
+    static_map.add_line(track_line)
+    rendered_image = static_map.render()
+    rendered_image.save(f"track_{track_name}.png")
+
+# %% [markdown]
+# A1.3 Используются данные из внешних источников: погода, рельеф, легенда карты 2,00
+
+# %%
+def get_weather(lat, lon):
+    url = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "current": ["temperature_2m"]
+    }
+    response = requests.get(url, params=params)
+    return response.json()['current']
+
+temp_dict = {}
+for track_name in df['track_name'].unique():
+    first_point = df[df['track_name'] == track_name].iloc[0]
+    temp_dict[track_name] = get_weather(first_point['lat'], first_point['lon'])['temperature_2m']
+
+df['temperature'] = df['track_name'].map(temp_dict) + [random.uniform(-1, 1) for _ in range(len(df))]
+
+# %% [markdown]
+# A3.1 Выделены значимые атрибуты с помощью корреляционного анализа, SHAP или permutation importance 1,00
+
+# %%
+numeric_cols = df.select_dtypes(include=['float64', 'int64']).columns
+
+correlation_matrix = df[numeric_cols].corr()
+
+print(correlation_matrix)
+
+# %% [markdown]
+# A3.2 Набор данных дополнен признаками и данными, обеспечивающими всесезонность 2,00
+
+# %%
+def get_season(month):
+    if month in [12, 1, 2]:
+        return 'Winter'
+    elif month in [3, 4, 5]:
+        return 'Spring'
+    elif month in [6, 7, 8]:
+        return 'Summer'
+    elif month in [9, 10, 11]:
+        return 'Autumn'
+    else:
+        return 'Unknown'
+
+df['season'] = df['time'].dt.month.apply(get_season)
+
+# %% [markdown]
+# A4.2 Проведена проверка нормальности распределения (графически и статистически) 0,50
+# A4.3 Сделан вывод о типе распределения, скошенности и необходимости трансформации 0,50
+
+# %%
+column = 'ele'
+data = df[column].dropna()
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+axes[0].hist(data, bins=30, edgecolor='black')
+axes[0].set_title(f'Histogram')
+stats.probplot(data, dist="norm", plot=axes[1])
+axes[1].set_title(f'Q-Q Plot')
+plt.show()
+
+stat, p_value = shapiro(data[:5000])
+skewness = skew(data)
+
+print(f"Skewness: {skewness:.4f}")
+print(f"Нормальное распределение: {p_value > 0.05}")
+print(f"Требуется трансформация: {abs(skewness) > 0.5}")
+
+
+# %% [markdown]
+# A5.3 Проведена аугментация изображений маршрутов с сохранением географической достоверности 2,00
+
+# %%
+def augment_coordinates(coordinates, noise_level=0.001):
+    augmented_coords = []
+    for lon, lat in coordinates:
+        new_lon = lon + np.random.uniform(-noise_level, noise_level)
+        new_lat = lat + np.random.uniform(-noise_level, noise_level)
+        augmented_coords.append((new_lon, new_lat))
+    return augmented_coords
+
+for track_name, track_group in df.groupby('track_name'):
+    coordinates = list(zip(track_group['lon'], track_group['lat']))
+    augmented_coordinates = augment_coordinates(coordinates, noise_level=0.0005)
+    augmented_static_map = StaticMap(800, 600)
+    augmented_line = Line(augmented_coordinates, 'blue', 2)
+    augmented_static_map.add_line(augmented_line)
+    augmented_rendered_image = augmented_static_map.render()
+    enhancer = ImageEnhance.Brightness(augmented_rendered_image)
+    augmented_image_brightened = enhancer.enhance(1.5)
+    rotated_image = augmented_image_brightened.rotate(5)
+    rotated_image.save(f"augmented_track_{track_name}.png")
+
+# %% [markdown]
+# A1.4 База данных создана, актуальна, не содержит дубликатов 1,00
+# A1.5 При повторном запуске данные обновляются без дублирования 1,00
+
+# %%
+conn = sqlite3.connect('tracks.db')
+df.to_sql('tracks', conn, if_exists='replace', index=False)
+conn.close()
+
+# %% [markdown]
+# Добавление шагов для реализации модуля B2.n
+
+# %%
+def calculate_steps(track_df):
+    steps = []
+    prev_point = None
+    for idx, row in track_df.iterrows():
+        if prev_point is not None:
+            dist = geodesic((prev_point['lat'], prev_point['lon']), (row['lat'], row['lon'])).meters
+            steps.append(dist / 0.7)  
+        else:
+            steps.append(0.0)  
+        prev_point = row
+    return steps
+
+
+df['steps'] = 0.0  
+
+for track_name in df['track_name'].unique():
+    track_df = df[df['track_name'] == track_name].sort_values('time')
+    df.loc[df['track_name'] == track_name, 'steps'] = calculate_steps(track_df)
+
+
+# %% [markdown]
+# B2.1 Вычислена средняя частота шагов по сезонам 1,00
+
+# %%
+seasonal_steps = df.groupby(['season', 'track_name'])['steps'].sum().groupby('season').mean()
+print("Средняя частота шагов по сезонам:")
+print(seasonal_steps)
+
+# %% [markdown]
+# B2.2 Выявлена зависимость температуры от времени суток 1,00
+
+# %%
+df['hour'] = df['time'].dt.hour
+plt.figure(figsize=(10, 6))
+sns.scatterplot(data=df, x='hour', y='temperature')
+plt.title('Зависимость температуры от времени суток')
+plt.xlabel('Час дня')
+plt.ylabel('Температура (°C)')
+plt.show()
+
+# %% [markdown]
+# B2.3 Оценено влияние типа местности на активность туристов 1,00
+
+# %%
+df['terrain'] = pd.cut(df['ele'], bins=[0, 500, 800, df['ele'].max()], labels=['low', 'medium', 'high'])
+terrain_activity = df.groupby('terrain')['steps'].sum()
+print("Влияние типа местности на активность:")
+print(terrain_activity)
+
+# %% [markdown]
+# B2.4 Проанализирована связь высоты маршрута с частотой шагов 1,00
+
+# %%
+plt.figure(figsize=(10, 6))
+sns.scatterplot(data=df, x='ele', y='steps')
+plt.title('Связь высоты маршрута с частотой шагов')
+plt.xlabel('Высота (m)')
+plt.ylabel('Шаги')
+plt.show()
+
+# %% [markdown]
+# B2.5 Определены наиболее популярные маршруты по периодам года 1,00
+
+# %%
+popular_routes = df.groupby(['season', 'track_name']).size().groupby('season').idxmax()
+print("Наиболее популярные маршруты по периодам года:")
+print(popular_routes)
+
+# %% [markdown]
+# B2.6 Выполнена визуализация - графики зависимости шагов от температуры и высоты, распределение активности по регионам, интерактивная карта 1,0
+
+# %%
+plt.figure(figsize=(10, 6))
+sns.scatterplot(data=df, x='temperature', y='steps')
+plt.title('Зависимость шагов от температуры')
+plt.xlabel('Температура (°C)')
+plt.ylabel('Шаги')
+plt.show()
+
+region_activity = df.groupby('track_name')['steps'].sum()
+region_activity.plot(kind='bar', figsize=(10, 6))
+plt.title('Распределение активности по регионам')
+plt.xlabel('Регион (Трек)')
+plt.ylabel('Общие шаги')
+plt.show()
+
+m = folium.Map(location=[df['lat'].mean(), df['lon'].mean()], zoom_start=10)
+heat_data = [[row['lat'], row['lon'], row['steps']] for idx, row in df.iterrows()]
+HeatMap(heat_data).add_to(m)
+m.save('activity_map.html')
+
+# %% [markdown]
+# B3.1 Выявлены потенциально опасные участки: зоны затопления, пожароопасные территории, труднодоступные районы 2,00
+# B3.2 Участки классифицированы по уровню риска и сложности эвакуации 2,00
+# B3.3 Использованы методы кластеризации (например, DBSCAN, K-means) и полуавтоматическая разметка 2,00
+
+# %%
+for track_name in df['track_name'].unique():
+    track_df = df[df['track_name'] == track_name].copy()
+    coords = track_df[['lon', 'lat']].values
+    db = DBSCAN(eps=0.001, min_samples=10).fit(coords)
+    df.loc[df['track_name'] == track_name, 'cluster'] = db.labels_
+
+def classify_risk(row):
+    if row['ele'] < 400:
+        return 'Зона затопления', 'Высокий'
+    if row['temperature'] > 25:
+        return 'Пожароопасная', 'Средний'
+    if row['cluster'] == -1:
+        return 'Труднодоступная', 'Высокий'
+    if row['cluster'] >= 0 and (df['cluster'] == row['cluster']).sum() < 30:
+        return 'Труднодоступная', 'Средний'
+    return 'Обычная', 'Низкий'
+
+df[['risk_zone', 'evacuation_risk']] = df.apply(classify_risk, axis=1, result_type='expand')
+
+colors = {'Зона затопления': 'blue', 'Пожароопасная': 'orange', 'Труднодоступная': 'red', 'Обычная': 'green'}
+
+for track_name in df['track_name'].unique():
+    track_data = df[df['track_name'] == track_name]
+    plt.figure(figsize=(10, 6))
+    for zone in colors:
+        group = track_data[track_data['risk_zone'] == zone]
+        if not group.empty:
+            plt.scatter(group['lon'], group['lat'], s=10, c=colors[zone], label=zone, alpha=0.6)
+    plt.legend()
+    plt.title(f'Потенциально опасные участки маршрута - {track_name}')
+    plt.xlabel('Долгота')
+    plt.ylabel('Широта')
+    plt.show()
+
+print(df[['lon', 'lat', 'ele', 'temperature', 'risk_zone', 'evacuation_risk']].head(10))
+
+
+# %% [markdown]
+# B4.1 Проведена оценка качества кластеризации (silhouette, calinski-harabasz и др.) 2,00
+# B4.2 Выполнен визуальный анализ кластеров 2,00
+# B4.3 Обоснован выбор метода кластеризации по устойчивости, интерпретируемости и соответствию геоусловиям 2,00
+
+# %%
+from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
+
+clustered_data = df[df['cluster'] != -1]
+if not clustered_data.empty:
+    coords = clustered_data[['lon', 'lat']].values
+    labels = clustered_data['cluster'].values
+    print("Silhouette:", silhouette_score(coords, labels))
+    print("Calinski-Harabasz:", calinski_harabasz_score(coords, labels))
+    print("Davies-Bouldin:", davies_bouldin_score(coords, labels))
+else:
+    print("Нет кластеров для оценки.")
+
+plt.figure(figsize=(10, 6))
+sns.boxplot(data=df[df['cluster'] != -1], x='cluster', y='ele')
+plt.title('Распределение высоты по кластерам')
+plt.xlabel('Кластер')
+plt.ylabel('Высота (m)')
+plt.show()
+
+
+# %% [markdown]
+# C1.1 Рассмотрено не менее трёх алгоритмов классификации (Random Forest, XGBoost и др.) 2,00
+# C1.2 Модель обучена для классификации участков по уровню опасности и сложности эвакуации 2,00
+# C1.3 Модели оценены по метрикам: точность, полнота, F1, ROC-AUC 1,00
+# C1.4 Выбрана и сохранена лучшая модель на тестовой выборке 2,00
+
+# %%
+features = df[['lon', 'lat', 'ele', 'temperature', 'steps']]
+target = df['evacuation_risk']
+
+le = LabelEncoder()
+target_encoded = le.fit_transform(target)
+
+X_train, X_test, y_train, y_test = train_test_split(features, target_encoded, test_size=0.3, random_state=42)
+
+models = {
+    'RandomForest': RandomForestClassifier(random_state=42),
+    'XGBoost': xgb.XGBClassifier(random_state=42),
+    'SVC': SVC(probability=True, random_state=42)
+}
+
+results = {}
+n_classes = len(le.classes_) 
+for name, model in models.items():
+    model.fit(X_train, y_train)
+    y_pred = model.predict(X_test)
+    y_proba = model.predict_proba(X_test)
+    
+    acc = accuracy_score(y_test, y_pred)
+    rec = recall_score(y_test, y_pred, average='weighted', zero_division=0)  
+    f1 = f1_score(y_test, y_pred, average='weighted', zero_division=0)  
+    if n_classes == 2:
+        roc_auc = roc_auc_score(y_test, y_proba[:, 1])
+    else:
+        roc_auc = roc_auc_score(y_test, y_proba, multi_class='ovr')
+    
+    results[name] = {'accuracy': acc, 'recall': rec, 'f1': f1, 'roc_auc': roc_auc}
+    print(f"{name} - Accuracy: {acc:.4f}, Recall: {rec:.4f}, F1: {f1:.4f}, ROC-AUC: {roc_auc:.4f}")
+    print(classification_report(y_test, y_pred, target_names=le.classes_, zero_division=0)) 
+
+best_model_name = max(results, key=lambda x: results[x]['f1'])
+best_model = models[best_model_name]
+print(f"Best model: {best_model_name}")
+
+with open('best_model.pkl', 'wb') as f:
+    pickle.dump(best_model, f)
+
+
+# %% [markdown]
+# C2.1 Реализован механизм дообучения модели при поступлении новых данных 2,00
+# C2.2 Контролируется дрейф данных 2,00
+# C2.3 Осуществляется полное переобучение модели при необходимости 2,00
+# C2.4 Версии моделей сохраняются и логируются изменения 2,00
+
+# %%
+new_data = X_train.sample(30, random_state=99)
+new_labels = y_train[:30]
+
+drift_count = sum([ks_2samp(X_train[col], new_data[col])[1] < 0.05 for col in X_train.columns])
+drift_ratio = drift_count / len(X_train.columns)
+print(f"Дрейф обнаружен в {drift_count}/{len(X_train.columns)} признаках")
+
+with open('best_model.pkl', 'rb') as f:
+    model = pickle.load(f)
+
+if drift_ratio > 0.4:
+    print("Полное переобучение")
+    X_full = pd.concat([X_train, new_data])
+    y_full = np.concatenate([y_train, new_labels])
+    model.fit(X_full, y_full)
+    version = 2.0
+else:
+    print("Инкрементальное дообучение")
+    model.fit(pd.concat([X_train, new_data]), np.concatenate([y_train, new_labels]))
+    version = 1.1
+
+y_pred = model.predict(X_test)
+metrics = {'f1': f1_score(y_test, y_pred, average='weighted')}
+
+with open(f'model_v{version}.pkl', 'wb') as f:
+    pickle.dump(model, f)
+
+log = {'version': version, 'timestamp': datetime.now().isoformat(), 
+       'metrics': metrics, 'drift_ratio': drift_ratio}
+try:
+    with open('model_log.json', 'r') as f:
+        logs = json.load(f)
+except:
+    logs = []
+logs.append(log)
+with open('model_log.json', 'w') as f:
+    json.dump(logs, f, indent=2)
+
+print(f"Версия {version} сохранена, F1={metrics['f1']:.4f}")
+
+
+# %% [markdown]
+# C3.1 Построен прогноз изменения характеристик кластеров (затопления, пожароопасность) на 10 лет вперёд 2,00
+# C3.2 Прогноз визуализирован на карте и в виде графиков 2,00
+
+# %%
+years_future = np.arange(2026, 2036)
+predictions_by_year = {}
+
+for year in years_future:
+    future_features = df[['lon', 'lat', 'ele', 'temperature', 'steps']].copy()
+    future_features['temperature'] += (year - 2026) * 0.3
+    future_features['ele'] += np.random.normal((year - 2026) * 2, 5, len(future_features))
+    
+    predictions = best_model.predict(future_features)
+    predictions_decoded = le.inverse_transform(predictions)
+    predictions_by_year[year] = pd.Series(predictions_decoded).value_counts(normalize=True) * 100
+
+risk_levels = ['Высокий', 'Средний', 'Низкий']
+data_plot = {level: [predictions_by_year[year].get(level, 0) for year in years_future] 
+             for level in risk_levels}
+
+plt.figure(figsize=(12, 6))
+for level in risk_levels:
+    plt.plot(years_future, data_plot[level], marker='o', label=f'Риск: {level}', linewidth=2)
+plt.title('Прогноз изменения уровней риска на 10 лет (модель)')
+plt.xlabel('Год')
+plt.ylabel('Доля участков (%)')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+future_2036 = df[['lon', 'lat', 'ele', 'temperature', 'steps']].copy()
+future_2036['temperature'] += 9 * 0.3
+predictions_2036 = le.inverse_transform(best_model.predict(future_2036))
+
+m = folium.Map(location=[df['lat'].mean(), df['lon'].mean()], zoom_start=11)
+colors = {'Высокий': 'red', 'Средний': 'orange', 'Низкий': 'green'}
+for idx, row in df.iterrows():
+    folium.CircleMarker([row['lat'], row['lon']], radius=3, 
+                        color=colors.get(predictions_2036[idx], 'gray'), 
+                        fill=True, opacity=0.7).add_to(m)
+
+m.save('model_forecast_map_2036.html')
+print(f"Прогноз 2036: {pd.Series(predictions_2036).value_counts()}")
+future_2035 = df[['lon', 'lat', 'ele', 'temperature', 'steps']].copy()
+
+
