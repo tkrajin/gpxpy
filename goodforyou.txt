@@ -1,0 +1,7 @@
+1.1#https://www.coursera.org/resources/pandas-cheat-sheet
+#https://gpx-converter.readthedocs.io/en/latest/readme.html
+1.2#https://marcel-jan.eu/datablog/2022/05/23/adding-the-track-of-my-bike-ride-on-a-folium-map/
+1.4/1.5#https://translated.turbopages.org/proxy_u/en-ru.ru.57bb0ec9-699332e7-dca16f11-74722d776562/https/stackoverflow.com/questions/50803109/how-to-store-pandas-dataframe-in-sqlite-db
+3.1#https://pandas.pydata.org/pandas-docs/stable/reference/api/pandas.DataFrame.corr.html
+4.2 #https://www.geeksforgeeks.org/machine-learning/how-to-perform-a-shapiro-wilk-test-in-python/
+#https://pandas.pydata.org/pandas-docs/stable/reference/api/pandas.DataFrame.select_dtypes.html
